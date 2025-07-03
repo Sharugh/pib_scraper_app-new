@@ -5,75 +5,67 @@ import pandas as pd
 from datetime import datetime
 from io import BytesIO
 
-st.set_page_config(page_title="PIB News Scraper", layout="centered")
-st.title("📰 PIB News Scraper")
-st.subheader("Ministry of Petroleum & Natural Gas")
+st.title("📰 PIB News Scraper (Petroleum Ministry)")
 
-# Fixed ministry
 MINISTRY_NAME = "Ministry of Petroleum & Natural Gas"
 
-# Date input
-col1, col2 = st.columns(2)
-with col1:
-    start_date = st.date_input("📅 From Date", datetime.today())
-with col2:
-    end_date = st.date_input("📅 To Date", datetime.today())
+start_date = st.date_input("From Date", datetime(2024, 6, 1))
+end_date = st.date_input("To Date", datetime.today())
 
-if st.button("🚀 Fetch Press Releases"):
-    st.info("Fetching news... please wait...")
+if st.button("Fetch News"):
+    with st.spinner("Getting press releases..."):
 
-    payload = {
-        "MinID": 0,
-        "Min": MINISTRY_NAME,
-        "CatID": 0,
-        "CatName": "All",
-        "start": start_date.strftime("%d/%m/%Y"),
-        "end": end_date.strftime("%d/%m/%Y"),
-        "LangID": 1
-    }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
 
-    try:
-        url = "https://pib.gov.in/PressReleseAll.aspx"
-        response = requests.post(url, data=payload, timeout=20)
+        payload = {
+            "Min": MINISTRY_NAME,
+            "CatID": 0,
+            "CatName": "All",
+            "start": start_date.strftime("%d/%m/%Y"),
+            "end": end_date.strftime("%d/%m/%Y"),
+            "LangID": 1
+        }
 
-        soup = BeautifulSoup(response.content, "html.parser")
-        divs = soup.find_all("div", class_="col-sm-9 panelContent")
+        try:
+            res = requests.post("https://pib.gov.in/PressReleseAll.aspx", data=payload, headers=headers)
+            soup = BeautifulSoup(res.content, "html.parser")
+            items = soup.select("div.col-sm-9.panelContent")
 
-        if not divs:
-            st.warning("No press releases found for selected dates.")
-        else:
-            news_data = []
+            if not items:
+                st.warning("No news found.")
+            else:
+                news = []
+                for item in items:
+                    a_tag = item.find("a")
+                    if not a_tag:
+                        continue
+                    title = a_tag.text.strip()
+                    link = "https://pib.gov.in/" + a_tag["href"]
+                    date = item.find("span").text.strip()
 
-            for div in divs:
-                title_tag = div.find("a")
-                date_tag = div.find("span")
+                    # Get full description from detail page
+                    detail = requests.get(link, headers=headers)
+                    desc_soup = BeautifulSoup(detail.content, "html.parser")
+                    desc_div = desc_soup.find("div", {"id": "divMainContent"})
+                    desc = desc_div.text.strip() if desc_div else ""
 
-                title = title_tag.text.strip()
-                link = "https://pib.gov.in/" + title_tag["href"]
-                date = date_tag.text.strip() if date_tag else "N/A"
+                    news.append({
+                        "Title": title,
+                        "Date": date,
+                        "Link": link,
+                        "Description": desc
+                    })
 
-                # Optional: Extract description from detail page
-                detail_resp = requests.get(link)
-                detail_soup = BeautifulSoup(detail_resp.content, "html.parser")
-                desc_div = detail_soup.find("div", {"id": "divMainContent"})
-                description = desc_div.text.strip() if desc_div else ""
+                df = pd.DataFrame(news)
+                st.success(f"✅ Found {len(df)} releases")
+                st.dataframe(df[["Date", "Title", "Link"]])
 
-                news_data.append({
-                    "Title": title,
-                    "Date": date,
-                    "Link": link,
-                    "Description": description
-                })
+                buffer = BytesIO()
+                df.to_excel(buffer, index=False, engine="openpyxl")
+                st.download_button("⬇ Download Excel", buffer.getvalue(), file_name="petroleum_press.xlsx")
 
-            df = pd.DataFrame(news_data)
-
-            st.success(f"✅ Found {len(df)} press releases.")
-            st.dataframe(df[["Date", "Title", "Link"]])
-
-            # Download
-            buffer = BytesIO()
-            df.to_excel(buffer, index=False, engine='openpyxl')
-            st.download_button("⬇️ Download Excel", buffer.getvalue(), file_name="pib_petroleum_news.xlsx")
-
-    except Exception as e:
-        st.error(f"❗ Error: {e}")
+        except Exception as e:
+            st.error(f"Error: {e}")
