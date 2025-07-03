@@ -7,13 +7,28 @@ import urllib.parse
 
 # ----------------- Helper Functions -----------------
 @st.cache_data
+@st.cache_data
 def get_ministry_list():
-    url = "https://www.pib.gov.in/allRel.aspx"
-    response = requests.get(url)
+    url = "https://pib.gov.in/allRel.aspx"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    }
+    response = requests.get(url, headers=headers)
+
+    if response.status_code != 200:
+        st.error("Failed to load ministry list from PIB website.")
+        return []
+
     soup = BeautifulSoup(response.text, 'html.parser')
-    ministries = soup.select('select#ddlMinistry option')
-    ministry_list = [m.text.strip() for m in ministries if m.get('value')]
-    return ministry_list
+    ministry_dropdown = soup.find("select", {"id": "ddlMinistry"})
+    
+    if not ministry_dropdown:
+        st.error("Ministry dropdown not found on PIB page.")
+        return []
+
+    ministries = [option.text.strip() for option in ministry_dropdown.find_all("option") if option.get("value")]
+    return ministries
+
 
 def get_press_releases(ministry_name, start_date, end_date):
     encoded_min = urllib.parse.quote_plus(ministry_name)
