@@ -1,7 +1,5 @@
-streamlit
-pandas
-openpyxl
-beautifulsoup4
-playwright
-
-
+streamlit==1.35.0
+pandas==2.2.1
+beautifulsoup4==4.12.3
+requests==2.32.3
+openpyxl==3.1.2
