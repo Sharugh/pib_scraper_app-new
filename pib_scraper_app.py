@@ -1,92 +1,132 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
 import pandas as pd
+import os
+import time
+from PyPDF2 import PdfReader
+from transformers import pipeline
 
-st.set_page_config(page_title="PIB Press Release Scraper", layout="centered")
+# 📁 Setup
+PDF_DIR = "pib_pdfs"
+os.makedirs(PDF_DIR, exist_ok=True)
+summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
 
-st.title("📢 PIB Press Release Scraper")
-
-# ---------------------------------------------
-# Static ministry list (you can expand this)
-MINISTRY_LIST = [
-    "Ministry of Petroleum & Natural Gas",
-    "Ministry of Finance",
-    "Ministry of Health and Family Welfare",
-    "Ministry of Education",
-    "Ministry of Defence",
-    "Ministry of External Affairs",
-    "Ministry of Home Affairs"
-]
-# ---------------------------------------------
-
-# 🧠 Fetch ministry name from each detail page
-def fetch_press_releases(ministry, start_date, end_date):
-    base_url = "https://pib.gov.in/allrel.aspx"
+# 🔗 Scrape press release links
+def scrape_press_releases(pages=3):
+    base_url = "https://pib.gov.in/allRel.aspx"
     headers = {"User-Agent": "Mozilla/5.0"}
-    all_data = []
+    press_data = []
 
-    for page in range(1, 6):  # First 5 pages
+    for page in range(1, pages + 1):
         url = f"{base_url}?PageId={page}"
         res = requests.get(url, headers=headers)
         soup = BeautifulSoup(res.text, "html.parser")
+        articles = soup.select("div.content-area div.col-sm-12 a")
 
-        items = soup.select("div.content-area div.col-sm-12")
+        for a in articles:
+            title = a.text.strip()
+            href = a.get("href")
+            if href:
+                full_url = "https://pib.gov.in/" + href
+                press_data.append({"title": title, "url": full_url})
+        time.sleep(1)
 
-        for item in items:
-            try:
-                title_tag = item.select_one("a")
-                if not title_tag or not title_tag.get("href"):
-                    continue
+    return press_data
 
-                title = title_tag.text.strip()
-                link = "https://pib.gov.in/" + title_tag["href"]
+# 📎 Find PDF link
+def extract_pdf_link(detail_url):
+    res = requests.get(detail_url, headers={"User-Agent": "Mozilla/5.0"})
+    soup = BeautifulSoup(res.text, "html.parser")
+    for link in soup.find_all("a", href=True):
+        href = link["href"]
+        if href.endswith(".pdf"):
+            return href if href.startswith("http") else "https://pib.gov.in/" + href.lstrip("/")
+    return None
 
-                date_tag = item.select_one("span")
-                if date_tag:
-                    date_text = date_tag.text.strip()
-                    date_obj = datetime.strptime(date_text, "%d %b %Y")
-                else:
-                    continue
+# ⬇️ Download PDF
+def download_pdf(pdf_url):
+    try:
+        res = requests.get(pdf_url)
+        filename = os.path.join(PDF_DIR, pdf_url.split("/")[-1])
+        with open(filename, "wb") as f:
+            f.write(res.content)
+        return filename
+    except:
+        return None
 
-                # Filter by date
-                if not (start_date <= date_obj.date() <= end_date):
-                    continue
+# 📄 Extract text from PDF
+def extract_text_from_pdf(filepath):
+    try:
+        reader = PdfReader(filepath)
+        text = ""
+        for page in reader.pages[:3]:
+            text += page.extract_text() or ""
+        return text
+    except:
+        return ""
 
-                # Now go inside press release page
-                detail_res = requests.get(link, headers=headers)
-                detail_soup = BeautifulSoup(detail_res.text, "html.parser")
-                ministry_tag = detail_soup.find("span", {"id": "ContentPlaceHolder1_Label6"})
+# 🧠 Summarize text
+def summarize_text(text):
+    try:
+        if len(text.strip()) < 100:
+            return "Too short to summarize."
+        chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
+        summary = ""
+        for chunk in chunks[:3]:
+            summary += summarizer(chunk, max_length=150, min_length=40, do_sample=False)[0]['summary_text'] + " "
+        return summary.strip()
+    except:
+        return "Summary failed."
 
-                if ministry_tag and ministry.lower() in ministry_tag.text.strip().lower():
-                    all_data.append({
-                        "Date": date_obj.strftime("%Y-%m-%d"),
-                        "Title": title,
-                        "Ministry": ministry_tag.text.strip(),
-                        "Link": link
-                    })
+# 🟢 STREAMLIT UI
+st.title("📢 PIB Press Release Summarizer")
+pages_to_fetch = st.slider("How many PIB pages to scrape?", 1, 5, 2)
+fetch_btn = st.button("🔍 Start Scraping")
 
-            except Exception:
-                continue
+if fetch_btn:
+    with st.spinner("Fetching Press Releases..."):
+        press_releases = scrape_press_releases(pages=pages_to_fetch)
 
-    return pd.DataFrame(all_data)
+    st.success(f"Found {len(press_releases)} press releases.")
+    records = []
+    progress_bar = st.progress(0)
 
-# UI Components
-selected_ministry = st.selectbox("🔽 Select Ministry", MINISTRY_LIST)
-start_date = st.date_input("📅 Start Date", datetime(2024, 1, 1))
-end_date = st.date_input("📅 End Date", datetime(2024, 12, 31))
+    for i, press in enumerate(press_releases[:50]):
+        st.write(f"📄 Processing: {press['title']}")
+        pdf_url = extract_pdf_link(press['url'])
 
-if st.button("🔍 Fetch Press Releases"):
-    with st.spinner("Fetching press releases..."):
-        df = fetch_press_releases(selected_ministry, start_date, end_date)
+        if not pdf_url:
+            st.warning("No PDF found.")
+            progress_bar.progress((i + 1) / len(press_releases[:50]))
+            continue
 
-    if df.empty:
-        st.warning("No press releases found for the selected ministry and date range.")
-    else:
-        st.success(f"Found {len(df)} press releases.")
-        st.dataframe(df, use_container_width=True)
+        filename = download_pdf(pdf_url)
+        if not filename:
+            st.error("Failed to download PDF.")
+            progress_bar.progress((i + 1) / len(press_releases[:50]))
+            continue
 
-        # 📤 Download as Excel
-        excel_bytes = df.to_excel(index=False, engine='openpyxl')
-        st.download_button("⬇ Download Excel", data=excel_bytes, file_name="press_releases.xlsx")
+        text = extract_text_from_pdf(filename)
+        summary = summarize_text(text)
+
+        records.append({
+            "Date": time.strftime("%Y-%m-%d"),
+            "Title": press['title'],
+            "Press Release Page": press['url'],
+            "PDF Link": pdf_url,
+            "Summary": summary
+        })
+
+        progress_bar.progress((i + 1) / len(press_releases[:50]))
+
+    df = pd.DataFrame(records)
+    st.success("✅ Done! Download Excel below.")
+    st.dataframe(df)
+
+    # Excel export
+    excel_filename = "PIB_Press_Summary.xlsx"
+    df.to_excel(excel_filename, index=False)
+    with open(excel_filename, "rb") as f:
+        st.download_button("⬇️ Download Excel", f, file_name=excel_filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
