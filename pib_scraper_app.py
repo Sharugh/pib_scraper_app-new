@@ -1,103 +1,84 @@
 import streamlit as st
-import pandas as pd
-import datetime
-from bs4 import BeautifulSoup
 import requests
-from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+import pandas as pd
+from datetime import date, timedelta
 
-# -------------------------------
-# Step 1: Get ministries using Playwright
-# -------------------------------
-@st.cache_data
-def get_ministry_list():
-    ministries = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto("https://pib.gov.in/allRel.aspx", timeout=60000)
-        try:
-            page.wait_for_selector("#ddlMinistry", timeout=10000)
-            options = page.query_selector_all("#ddlMinistry option")
-            for option in options:
-                text = option.inner_text().strip()
-                if text and "Select" not in text:
-                    ministries.append(text)
-        except Exception as e:
-            st.error(f"Error extracting ministries: {str(e)}")
-        finally:
-            browser.close()
-    return ministries
+# -------- Static Ministry List (You can add more here) -------- #
+MINISTRY_LIST = [
+    "Ministry of Petroleum & Natural Gas"
+]
 
-# -------------------------------
-# Step 2: Scrape press releases
-# -------------------------------
+# -------- Function to fetch press releases -------- #
 def fetch_press_releases(ministry, start_date, end_date):
-    url = "https://pib.gov.in/PressReleseAll.aspx"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-    }
+    base_url = "https://pib.gov.in/PressReleseDetail.aspx?PRID="
+    all_data = []
 
-    payload = {
-        "Min": ministry,
-        "CatID": 0,
-        "CatName": "All",
-        "start": start_date.strftime("%d/%m/%Y"),
-        "end": end_date.strftime("%d/%m/%Y"),
-        "LangID": 1
-    }
+    # Convert to PIB date format (e.g. 04 JUL 2025)
+    def to_pib_date(dt):
+        return dt.strftime("%d %b %Y").upper()
 
-    response = requests.post(url, data=payload, headers=headers)
+    for offset in range(0, 2000, 20):  # Scraping first 100 pages (~2000 articles)
+        url = f"https://pib.gov.in/allRel.aspx?PageNo={(offset // 20) + 1}"
+        res = requests.get(url)
+        soup = BeautifulSoup(res.content, "html.parser")
 
-    soup = BeautifulSoup(response.content, "html.parser")
-    press_data = []
+        rows = soup.find_all("div", class_="col-sm-9 col-xs-12 contentarea")
+        if not rows:
+            break  # End of pages
 
-    for item in soup.select("div.col-sm-9.col-xs-12.textJustify"):
-        title = item.find("a")
-        date = item.find_next("span", class_="date")
+        for rel in soup.select(".contentarea > ul > li"):
+            try:
+                title = rel.find("a").get_text(strip=True)
+                link = "https://pib.gov.in/" + rel.find("a")["href"]
+                raw_date = rel.find("span").get_text(strip=True)
+                date_obj = pd.to_datetime(raw_date, format="%d %b %Y", errors='coerce')
 
-        if title and date:
-            press_data.append({
-                "Title": title.text.strip(),
-                "Link": "https://pib.gov.in/" + title.get("href"),
-                "Date": date.text.strip()
-            })
+                if date_obj is pd.NaT or not (start_date <= date_obj.date() <= end_date):
+                    continue
 
-    return press_data
+                # Fetch article to extract ministry name
+                detail_page = requests.get(link)
+                detail_soup = BeautifulSoup(detail_page.content, "html.parser")
+                ministry_tag = detail_soup.find("span", id="ContentPlaceHolder1_lblMinistry")
 
-# -------------------------------
-# Step 3: Streamlit UI
-# -------------------------------
-st.title("📰 PIB Press Release Extractor")
-st.write("Built for internal use @ S&P Global")
+                if ministry_tag and ministry.strip().lower() in ministry_tag.text.strip().lower():
+                    content_div = detail_soup.find("div", id="ContentPlaceHolder1_divContent")
+                    content = content_div.get_text(separator="\n", strip=True) if content_div else "N/A"
 
-with st.spinner("Loading ministry list..."):
-    ministries = get_ministry_list()
+                    all_data.append({
+                        "Title": title,
+                        "Date": date_obj.strftime("%d-%m-%Y"),
+                        "Ministry": ministry_tag.text.strip(),
+                        "Link": link,
+                        "Description": content[:500] + "..." if content else "N/A"
+                    })
 
-if ministries:
-    selected_ministry = st.selectbox("Select Ministry", ministries)
-    col1, col2 = st.columns(2)
+            except Exception as e:
+                continue
 
-    with col1:
-        start_date = st.date_input("Start Date", datetime.date.today() - datetime.timedelta(days=30))
-    with col2:
-        end_date = st.date_input("End Date", datetime.date.today())
+    return pd.DataFrame(all_data)
 
-    if st.button("📥 Fetch Press Releases"):
-        with st.spinner("Fetching press releases..."):
-            results = fetch_press_releases(selected_ministry, start_date, end_date)
+# ------------------- Streamlit UI ------------------- #
+st.title("📢 PIB Press Release Scraper")
 
-        if results:
-            df = pd.DataFrame(results)
-            st.success(f"✅ Fetched {len(df)} press releases.")
+ministry = st.selectbox("🔽 Select Ministry", MINISTRY_LIST)
+
+col1, col2 = st.columns(2)
+with col1:
+    start_date = st.date_input("📅 Start Date", date.today() - timedelta(days=30))
+with col2:
+    end_date = st.date_input("📅 End Date", date.today())
+
+if st.button("🚀 Fetch Press Releases"):
+    with st.spinner("Fetching data..."):
+        df = fetch_press_releases(ministry, start_date, end_date)
+
+        if df.empty:
+            st.warning("No press releases found for the selected ministry and date range.")
+        else:
+            st.success(f"Found {len(df)} press releases.")
             st.dataframe(df)
 
-            # Export to Excel
-            file_name = f"{selected_ministry.replace(' ', '_')}_Press_Releases.xlsx"
-            df.to_excel(file_name, index=False)
-
-            with open(file_name, "rb") as f:
-                st.download_button("⬇️ Download Excel", data=f, file_name=file_name)
-        else:
-            st.warning("No press releases found for this range.")
-else:
-    st.error("❗ Failed to load ministry list.")
+            # Download button
+            st.download_button("📥 Download as Excel", df.to_excel(index=False, engine="openpyxl"), file_name="press_releases.xlsx")
