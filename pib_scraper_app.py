@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 from transformers import pipeline
 from datetime import datetime
 import io
