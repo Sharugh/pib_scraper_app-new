@@ -1,151 +1,111 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
+from datetime import datetime
 import pandas as pd
+import os
+import re
+import tempfile
+from io import BytesIO
 from pypdf import PdfReader
 from transformers import pipeline
-from datetime import datetime
-import io
-import re
 
-# 🎯 Only filter Ministry of Petroleum
-TARGET_MINISTRY = "Ministry of Petroleum & Natural Gas"
+# Load summarizer
+summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
 
-# 🧠 LLM summarizer
-@st.cache_resource
-def load_summarizer():
-    return pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+# Helper function to extract press release links from a PIB ministry page
+def extract_press_release_links(pib_url):
+    response = requests.get(pib_url)
+    soup = BeautifulSoup(response.content, "html.parser")
+    links = []
+    for a in soup.select("a.news_content a"):
+        href = a.get("href")
+        if href and "PressReleasePage.aspx" in href:
+            links.append("https://www.pib.gov.in/" + href)
+    return links
 
-summarizer = load_summarizer()
+# Helper function to extract date from press release page
+def extract_date_from_page(soup):
+    date_tag = soup.find("span", id="ContentPlaceHolder1_lblDate")
+    if date_tag:
+        return date_tag.text.strip()
+    return "Unknown"
 
-# ✅ Keywords
-KEYWORDS = [
-    "energy", "policy", "petroleum", "refinery", "refined products", "downstream",
-    "crude oil", "shipping", "pricing", "oil trade", "refining companies"
-]
+# Extract PDFs from a press release page
+def extract_pdf_links_from_release(url):
+    response = requests.get(url)
+    soup = BeautifulSoup(response.text, "html.parser")
+    date = extract_date_from_page(soup)
+    pdf_links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.endswith(".pdf"):
+            full_url = href if href.startswith("http") else "https://www.pib.gov.in" + href
+            pdf_links.append((full_url, date))
+    return pdf_links, url
 
-# 🔍 Extract press release links from main page
-def get_press_release_links(url):
-    res = requests.get(url)
-    soup = BeautifulSoup(res.content, "html.parser")
-    links = soup.select("a[href*='PressReleseDetail.aspx?PRID=']")
-    return ["https://www.pib.gov.in/" + link['href'] for link in links]
-
-# 📄 Check if page belongs to Ministry of Petroleum
-def is_petroleum_ministry(page_url):
-    try:
-        res = requests.get(page_url)
-        soup = BeautifulSoup(res.content, "html.parser")
-        ministry_tag = soup.find("span", id="ContentPlaceHolder1_lblMinistry")
-        if ministry_tag:
-            return TARGET_MINISTRY.lower() in ministry_tag.text.strip().lower()
-    except:
-        pass
-    return False
-
-# 📅 Extract date
-def extract_date_from_page(url):
-    try:
-        res = requests.get(url)
-        soup = BeautifulSoup(res.content, "html.parser")
-        date_tag = soup.find("span", {"id": "ContentPlaceHolder1_lblDate"})
-        return date_tag.text.strip() if date_tag else "N/A"
-    except:
-        return "N/A"
-
-# 📥 Extract PDF URL
-def extract_pdf_url_from_page(url):
-    try:
-        res = requests.get(url)
-        soup = BeautifulSoup(res.content, "html.parser")
-        pdf_link = soup.find("a", href=re.compile(r".*\.pdf"))
-        if pdf_link:
-            href = pdf_link["href"]
-            return href if href.startswith("http") else "https://www.pib.gov.in/" + href
-    except:
-        pass
-    return None
-
-# 📖 Read PDF content
-def extract_pdf_text(pdf_url):
+# Download PDF and extract text
+def download_and_extract_text(pdf_url):
     try:
         response = requests.get(pdf_url)
-        if response.status_code == 200:
-            reader = PdfReader(io.BytesIO(response.content))
-            return "".join([page.extract_text() for page in reader.pages if page.extract_text()])
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(response.content)
+            tmp_file_path = tmp_file.name
+        reader = PdfReader(tmp_file_path)
+        text = " ".join([page.extract_text() or "" for page in reader.pages])
+        os.remove(tmp_file_path)
+        return text.strip()
     except:
         return ""
-    return ""
 
-# 🧠 Summarize text
+# Summarize text
 def summarize_text(text):
-    chunks = [text[i:i+1024] for i in range(0, len(text), 1024)]
-    summaries = []
-    for chunk in chunks:
-        summary = summarizer(chunk, max_length=150, min_length=30, do_sample=False)
-        summaries.append(summary[0]["summary_text"])
-    return " ".join(summaries)
+    if not text:
+        return "No content found."
+    if len(text) > 4000:
+        text = text[:4000]  # Trim to fit model limits
+    summary = summarizer(text, max_length=150, min_length=30, do_sample=False)
+    return summary[0]['summary_text']
 
-# 🚀 Streamlit UI
-st.set_page_config(page_title="PIB Petroleum Scraper + Summary", layout="wide")
-st.title("📢 PIB Press Release PDF Scraper for Petroleum Ministry + LLM Summary")
+# Streamlit UI
+st.set_page_config(page_title="PIB Scraper & Summarizer", layout="wide")
+st.title("📢 PIB Press Release PDF Scraper + LLM Summary")
 
-base_url = st.text_input("🔗 Enter PIB URL (e.g., https://www.pib.gov.in/allRel.aspx):", "https://www.pib.gov.in/allRel.aspx")
-start_date = st.date_input("📅 Start Date", datetime(2024, 1, 1))
-end_date = st.date_input("📅 End Date", datetime(2025, 6, 30))
+url = st.text_input("🔗 Enter PIB Press Release Page URL (e.g., https://www.pib.gov.in/allRel.aspx?reg=3&lang=1):")
+start_date = st.date_input("📅 Start Date", value=datetime(2025, 1, 1))
+end_date = st.date_input("📅 End Date", value=datetime(2025, 6, 30))
 
-if st.button("🔍 Fetch PDFs"):
-    st.info("🔍 Scraping press releases...")
-    press_release_links = get_press_release_links(base_url)
-
-    results = []
-
-    for i, pr_link in enumerate(press_release_links):
-        st.write(f"🔎 Checking press release {i+1}/{len(press_release_links)}")
-
-        if not is_petroleum_ministry(pr_link):
-            continue
-
-        date_str = extract_date_from_page(pr_link)
-        try:
-            press_date = datetime.strptime(date_str, "%d %b %Y")
-            if not (start_date <= press_date.date() <= end_date):
-                continue
-        except:
-            continue
-
-        pdf_url = extract_pdf_url_from_page(pr_link)
-        if not pdf_url:
-            continue
-
-        pdf_text = extract_pdf_text(pdf_url)
-        if not any(keyword.lower() in pdf_text.lower() for keyword in KEYWORDS):
-            continue
-
-        summary = summarize_text(pdf_text)
-
-        results.append({
-            "Date": date_str,
-            "Press Release Page": pr_link,
-            "PDF URL": pdf_url,
-            "Summary": summary
-        })
-
-    if results:
-        df = pd.DataFrame(results)
-
-        excel_buffer = io.BytesIO()
-        df.to_excel(excel_buffer, index=False, engine='openpyxl')
-        excel_buffer.seek(0)
-
-        st.success(f"✅ Found {len(df)} relevant press releases.")
-        st.dataframe(df)
-
-        st.download_button(
-            label="📥 Download Summary as Excel",
-            data=excel_buffer,
-            file_name="PIB_Petroleum_Summary.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+if st.button("🔎 Search and Summarize"):
+    if not url:
+        st.error("Please enter a PIB press release page URL.")
     else:
-        st.warning("⚠️ No relevant PDFs found for the Petroleum Ministry in the selected range.")
+        st.info("🔍 Scraping the page for PDF links...")
+        release_links = extract_press_release_links(url)
+        all_data = []
+
+        for idx, link in enumerate(release_links):
+            st.write(f"\n📄 Processing PDF {idx + 1}/{len(release_links)}")
+            pdfs, release_page = extract_pdf_links_from_release(link)
+            for pdf_url, date_str in pdfs:
+                try:
+                    date_obj = datetime.strptime(date_str, "%d %B %Y")
+                    if start_date <= date_obj.date() <= end_date:
+                        raw_text = download_and_extract_text(pdf_url)
+                        summary = summarize_text(raw_text)
+                        all_data.append({
+                            "Date": date_str,
+                            "PDF URL": pdf_url,
+                            "Summary": summary,
+                            "Press Release Page": release_page
+                        })
+                except Exception as e:
+                    continue
+
+        if all_data:
+            df = pd.DataFrame(all_data)
+            output = BytesIO()
+            df.to_excel(output, index=False, engine='openpyxl')
+            st.success(f"✅ Scraped and summarized {len(df)} relevant PDFs!")
+            st.download_button("📥 Download Summary as Excel", data=output.getvalue(), file_name="pib_summary.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else:
+            st.warning("⚠️ No relevant PDFs found in this date range.")
