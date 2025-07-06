@@ -1,86 +1,97 @@
 import streamlit as st
-import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
+import requests
 import pandas as pd
 import re
-from datetime import datetime
 from io import BytesIO
-from transformers import pipeline
-import torch
 from pypdf import PdfReader
-# Set device for summarizer
-device = 0 if torch.cuda.is_available() else -1
-summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device=device)
+from transformers import pipeline
 
+# Set device to CPU explicitly
+import torch
+DEVICE = "cpu"
+
+def initialize_summarizer():
+    return pipeline("summarization", model="sshleifer/distilbart-cnn-12-6", device=0 if torch.cuda.is_available() else -1)
+
+summarizer = initialize_summarizer()
+
+st.set_page_config(page_title="📢 PIB Scraper with Summary", layout="wide")
 st.title("📢 PIB Press Release PDF Scraper + LLM Summary")
 
-pib_url = st.text_input("🔗 Enter PIB Press Release Page URL (e.g., https://pib.gov.in/allRel.aspx):")
-start_date = st.date_input("📅 Start Date", value=datetime(2024, 1, 1))
-end_date = st.date_input("📅 End Date", value=datetime(2024, 12, 31))
+# User Inputs
+pib_url = st.text_input("🔗 Enter PIB Press Release Page URL (e.g., https://pib.gov.in/allRel.aspx?reg=3&lang=1):")
+start_date = st.date_input("📅 Start Date")
+end_date = st.date_input("📅 End Date")
 
-KEYWORDS = [
-    "energy", "oil", "gas", "petroleum", "natural gas", "refinery", "refining", 
-    "crude", "pricing", "shipping", "downstream", "IOCL", "ONGC", "BPCL", "HPCL",
-    "Ministry of Petroleum", "hydrocarbon"
-]
+keywords = ["energy", "petroleum", "refined products", "refineries", "refining companies",
+            "downstream", "crude oil trade", "pricing", "shipping", "oil", "gas", "natural gas"]
 
-def extract_pdf_links(base_url):
-    response = requests.get(base_url)
-    soup = BeautifulSoup(response.text, "html.parser")
-    anchors = soup.find_all("a", href=True)
+@st.cache_data(show_spinner=False)
+def extract_pdf_links(pib_url):
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+
+    driver = webdriver.Chrome(ChromeDriverManager().install(), options=chrome_options)
+    driver.get(pib_url)
+
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    driver.quit()
+
     pdf_links = []
-
-    for a in anchors:
-        text = a.get_text(strip=True).lower()
-        if any(kw.lower() in text for kw in KEYWORDS):
-            link = a['href']
-            if link.endswith(".pdf"):
-                date_match = re.search(r'(\d{2})/(\d{2})/(\d{4})', a.parent.text)
-                if date_match:
-                    day, month, year = map(int, date_match.groups())
-                    pub_date = datetime(year, month, day)
-                    if start_date <= pub_date <= end_date:
-                        pdf_links.append(("https://www.pib.gov.in" + link, pub_date.strftime("%Y-%m-%d")))
+    for link in soup.find_all("a", href=True):
+        href = link["href"]
+        text = link.text.strip().lower()
+        if href.endswith(".pdf") and any(k in text for k in keywords):
+            full_link = href if href.startswith("http") else "https://www.pib.gov.in/" + href.lstrip("/")
+            pdf_links.append((link.text.strip(), full_link))
     return pdf_links
 
-def extract_text_from_pdf(url):
-    response = requests.get(url)
-    reader = PdfReader(BytesIO(response.content))
-    return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+def extract_text_from_pdf(pdf_url):
+    try:
+        response = requests.get(pdf_url)
+        if response.status_code == 200:
+            pdf = PdfReader(BytesIO(response.content))
+            text = " ".join(page.extract_text() or "" for page in pdf.pages)
+            return text.strip()
+        else:
+            return ""
+    except Exception as e:
+        return ""
 
-def summarize(text):
-    if len(text) < 100:
-        return "Text too short to summarize."
-    chunks = [text[i:i+1024] for i in range(0, len(text), 1024)]
-    summaries = [summarizer(chunk, max_length=150, min_length=30, do_sample=False)[0]['summary_text'] for chunk in chunks]
+def summarize_text(text):
+    chunks = [text[i:i + 1000] for i in range(0, len(text), 1000)]
+    summaries = []
+    for chunk in chunks:
+        try:
+            out = summarizer(chunk, max_length=150, min_length=30, do_sample=False)
+            summaries.append(out[0]['summary_text'])
+        except:
+            continue
     return " ".join(summaries)
 
-if st.button("🔍 Fetch and Summarize PDFs"):
-    if not pib_url:
-        st.warning("Please enter a valid PIB URL.")
-    else:
-        st.info("🔎 Searching for PDFs on page...")
+if st.button("🔎 Fetch & Summarize PDFs") and pib_url:
+    with st.spinner("🔍 Searching for PDFs on page..."):
         links = extract_pdf_links(pib_url)
 
-        if not links:
-            st.warning("⚠️ No relevant PDFs found in this date range with matching keywords.")
-        else:
-            data = []
-            for idx, (url, date) in enumerate(links):
-                st.write(f"\n📄 Processing PDF {idx+1}/{len(links)}")
-                try:
-                    text = extract_text_from_pdf(url)
-                    summary = summarize(text)
-                    data.append({"Date": date, "URL": url, "Summary": summary})
-                except Exception as e:
-                    st.error(f"Error processing PDF {url}: {e}")
+    if not links:
+        st.warning("⚠️ No relevant PDFs found on this page with matching keywords.")
+    else:
+        summaries = []
+        for i, (title, link) in enumerate(links, start=1):
+            st.write(f"\n📄 Processing PDF {i}/{len(links)}")
+            raw_text = extract_text_from_pdf(link)
+            summary = summarize_text(raw_text)
+            summaries.append({"Title": title, "URL": link, "Summary": summary})
 
-            if data:
-                df = pd.DataFrame(data)
-                st.dataframe(df)
+        df = pd.DataFrame(summaries)
+        st.dataframe(df)
 
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Summary')
-                    writer.close()
-                st.download_button("📥 Download Summary as Excel", output.getvalue(), file_name="pib_summary.xlsx")
+        output = BytesIO()
+        df.to_excel(output, index=False, engine='openpyxl')
+        st.download_button("📥 Download Summary as Excel", output.getvalue(), "pib_summary.xlsx")
