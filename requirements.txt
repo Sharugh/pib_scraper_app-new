@@ -1,8 +1,10 @@
-transformers
-torch
 streamlit
+selenium
+webdriver-manager
 beautifulsoup4
-pypdf
+requests
 pandas
 openpyxl
-requests
+pypdf
+transformers
+torch
