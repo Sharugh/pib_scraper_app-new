@@ -1,130 +1,85 @@
-from pypdf import PdfReader
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
-import os
-import re
 from io import BytesIO
-from pypdf import PdfReader
-from transformers import pipeline
 
-# ------------------ SETUP ------------------
-# Load summarization pipeline
-summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+# Target ministry name
+TARGET_MINISTRY = "Ministry of Petroleum & Natural Gas"
 
-# Ministry name to filter
-TARGET_MINISTRY = "Ministry of Petroleum and Natural Gas"
-KEYWORDS = [
-    "energy", "petroleum", "crude", "refinery", "refined products", "downstream",
-    "shipping", "gas", "oil", "pricing", "policy", "natural gas"
-]
-
-# ------------------ FUNCTIONS ------------------
-
-def extract_press_releases(base_url):
+# Function to extract PIB press release info for Petroleum Ministry
+@st.cache_data(show_spinner=False)
+def extract_pib_pdfs(url):
     try:
-        response = requests.get(base_url, timeout=10)
-        soup = BeautifulSoup(response.content, "html.parser")
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        base_url = "https://www.pib.gov.in"
+        press_data = []
 
-        pdf_links = []
-        articles = soup.find_all("div", class_="col-sm-12 col-md-8 col-lg-8 content")
+        table = soup.find("table", id="tablegrid")  # main press release table
+        if not table:
+            return []
 
-        for article in articles:
-            title_tag = article.find("a")
-            if not title_tag or not title_tag.has_attr("href"):
+        rows = table.find_all("tr")[1:]  # Skip header row
+        for row in rows:
+            columns = row.find_all("td")
+            if len(columns) < 4:
                 continue
 
-            title_text = title_tag.text.strip().lower()
-            href = title_tag["href"]
-            full_link = requests.compat.urljoin(base_url, href)
+            date = columns[0].get_text(strip=True)
+            ministry = columns[1].get_text(strip=True)
+            title_link = columns[2].find("a", href=True)
+            title = title_link.get_text(strip=True) if title_link else ""
+            press_release_url = base_url + title_link["href"] if title_link else ""
 
-            # Only go into Ministry of Petroleum pages
-            if any(keyword in title_text for keyword in KEYWORDS):
-                pdf_links.append((title_tag.text.strip(), full_link))
+            if TARGET_MINISTRY.lower() in ministry.lower() and press_release_url:
+                # Go inside press release page and find PDF
+                pdf_url = ""
+                press_page = requests.get(press_release_url)
+                press_soup = BeautifulSoup(press_page.text, "html.parser")
+                for a in press_soup.find_all("a", href=True):
+                    href = a["href"]
+                    if href.lower().endswith(".pdf"):
+                        pdf_url = href if href.startswith("http") else base_url + href
+                        break  # only first PDF
 
-        return pdf_links
+                if pdf_url:
+                    press_data.append({
+                        "Date": date,
+                        "Title": title,
+                        "PDF URL": pdf_url,
+                        "Press Release Page": press_release_url
+                    })
+        return press_data
     except Exception as e:
-        st.error(f"Error extracting press releases: {e}")
         return []
 
-def extract_pdf_link(press_release_url):
-    try:
-        res = requests.get(press_release_url, timeout=10)
-        soup = BeautifulSoup(res.content, "html.parser")
-        pdf_link_tag = soup.find("a", href=re.compile(r"\.pdf$"))
-        if pdf_link_tag:
-            return requests.compat.urljoin(press_release_url, pdf_link_tag["href"])
-    except:
-        return None
-    return None
+# Streamlit UI
+st.title("📄 PIB Petroleum Ministry Press Release PDF Collector")
+st.write("Scrape PIB press releases that belong to the Ministry of Petroleum & Natural Gas and contain PDFs.")
 
-def download_and_extract_text(pdf_url):
-    try:
-        response = requests.get(pdf_url)
-        reader = PdfReader(BytesIO(response.content))
-        full_text = ""
-        for page in reader.pages:
-            full_text += page.extract_text() or ""
-        return full_text
-    except:
-        return ""
+url = st.text_input("🔗 Enter the PIB URL (e.g., https://pib.gov.in/allRel.aspx?reg=3&lang=1)")
 
-def summarize_text(text):
-    chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
-    summary = ""
-    for chunk in chunks:
-        try:
-            s = summarizer(chunk, max_length=150, min_length=40, do_sample=False)[0]['summary_text']
-            summary += s + "\n"
-        except:
-            continue
-    return summary
+if url:
+    with st.spinner("⛏️ Scraping PIB..."):
+        data = extract_pib_pdfs(url)
 
-# ------------------ STREAMLIT UI ------------------
-st.set_page_config(layout="wide")
-st.title("📢 PIB Ministry of Petroleum PDF Extractor + Summarizer")
+    if data:
+        df = pd.DataFrame(data)
+        st.success(f"✅ Found {len(df)} press release(s) with PDFs for Ministry of Petroleum & Natural Gas.")
+        st.dataframe(df)
 
-pib_url = st.text_input("🔗 Enter PIB Ministry Press Release URL", "https://pib.gov.in/allRel.aspx?reg=3&lang=1")
-
-if st.button("🔍 Fetch and Process PDFs"):
-    with st.spinner("Searching for relevant press releases..."):
-        releases = extract_press_releases(pib_url)
-
-    if not releases:
-        st.warning("⚠️ No relevant press releases found.")
+        # Download as Excel
+        excel_buffer = BytesIO()
+        df.to_excel(excel_buffer, index=False)
+        excel_buffer.seek(0)
+        st.download_button(
+            label="📥 Download Results (Excel)",
+            data=excel_buffer,
+            file_name="petroleum_press_releases.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
     else:
-        st.success(f"✅ Found {len(releases)} relevant press releases.")
+        st.warning("⚠️ No matching PDFs found for Ministry of Petroleum & Natural Gas.")
 
-        results = []
-        for title, link in releases:
-            pdf_link = extract_pdf_link(link)
-            if not pdf_link:
-                continue
-
-            text = download_and_extract_text(pdf_link)
-            if not text:
-                continue
-
-            summary = summarize_text(text)
-            results.append({
-                "Title": title,
-                "Press Release URL": link,
-                "PDF URL": pdf_link,
-                "Summary": summary
-            })
-
-        if results:
-            df = pd.DataFrame(results)
-            st.dataframe(df[["Title", "Press Release URL", "PDF URL", "Summary"]])
-
-            excel_data = BytesIO()
-            df.to_excel(excel_data, index=False)
-            st.download_button(
-                label="📥 Download Summary Excel",
-                data=excel_data.getvalue(),
-                file_name="pib_petroleum_press_summaries.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.warning("No summaries generated. Please try with a broader timeline or keywords.")
