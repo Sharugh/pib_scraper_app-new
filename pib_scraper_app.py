@@ -5,7 +5,7 @@ import pandas as pd
 from io import BytesIO
 
 BASE_URL = "https://www.pib.gov.in/allRel.aspx"
-TARGET_MINISTRY = "Ministry of"
+TARGET_MINISTRY = "Ministry of Petroleum & Natural Gas"
 
 # Scraper function
 @st.cache_data(show_spinner=False)
@@ -66,7 +66,7 @@ if url:
 
     if results:
         df = pd.DataFrame(results)
-        st.success(f"✅ Found {len(df)} PDF(s) from Ministry of")
+        st.success(f"✅ Found {len(df)} PDF(s) from Ministry of Petroleum & Natural Gas")
         st.dataframe(df)
 
         # Excel download
