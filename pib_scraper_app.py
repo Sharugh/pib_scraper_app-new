@@ -4,8 +4,8 @@ from bs4 import BeautifulSoup
 import pandas as pd
 from io import BytesIO
 
-BASE_URL = "https://www.pib.gov.in"
-TARGET_MINISTRY = "Ministry of Petroleum & Natural Gas"
+BASE_URL = "https://www.pib.gov.in/allRel.aspx"
+TARGET_MINISTRY = "Ministry of"
 
 # Scraper function
 @st.cache_data(show_spinner=False)
@@ -58,7 +58,7 @@ st.set_page_config(page_title="PIB Petroleum PDF Scraper", layout="wide")
 st.title("📄 PIB Ministry of Petroleum PDF Scraper")
 st.write("Scrape PDFs from PIB press releases belonging to **Ministry of Petroleum & Natural Gas**.")
 
-url = st.text_input("🔗 Enter PIB Press Release URL (e.g., https://pib.gov.in/allRel.aspx?reg=3&lang=1)")
+url = st.text_input("🔗 Enter PIB Press Release URL (e.g., https://www.pib.gov.in/allRel.aspx)")
 
 if url:
     with st.spinner("🔍 Searching press releases..."):
@@ -66,7 +66,7 @@ if url:
 
     if results:
         df = pd.DataFrame(results)
-        st.success(f"✅ Found {len(df)} PDF(s) from Ministry of Petroleum & Natural Gas.")
+        st.success(f"✅ Found {len(df)} PDF(s) from Ministry of")
         st.dataframe(df)
 
         # Excel download
