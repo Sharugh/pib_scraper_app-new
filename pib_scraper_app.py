@@ -1,111 +1,86 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
 import pandas as pd
-import os
 import re
-import tempfile
+from datetime import datetime
 from io import BytesIO
-from pypdf import PdfReader
 from transformers import pipeline
+import torch
+from pypdf import PdfReader
+# Set device for summarizer
+device = 0 if torch.cuda.is_available() else -1
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device=device)
 
-# Load summarizer
-summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
-
-# Helper function to extract press release links from a PIB ministry page
-def extract_press_release_links(pib_url):
-    response = requests.get(pib_url)
-    soup = BeautifulSoup(response.content, "html.parser")
-    links = []
-    for a in soup.select("a.news_content a"):
-        href = a.get("href")
-        if href and "PressReleasePage.aspx" in href:
-            links.append("https://www.pib.gov.in/" + href)
-    return links
-
-# Helper function to extract date from press release page
-def extract_date_from_page(soup):
-    date_tag = soup.find("span", id="ContentPlaceHolder1_lblDate")
-    if date_tag:
-        return date_tag.text.strip()
-    return "Unknown"
-
-# Extract PDFs from a press release page
-def extract_pdf_links_from_release(url):
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, "html.parser")
-    date = extract_date_from_page(soup)
-    pdf_links = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.endswith(".pdf"):
-            full_url = href if href.startswith("http") else "https://www.pib.gov.in" + href
-            pdf_links.append((full_url, date))
-    return pdf_links, url
-
-# Download PDF and extract text
-def download_and_extract_text(pdf_url):
-    try:
-        response = requests.get(pdf_url)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            tmp_file.write(response.content)
-            tmp_file_path = tmp_file.name
-        reader = PdfReader(tmp_file_path)
-        text = " ".join([page.extract_text() or "" for page in reader.pages])
-        os.remove(tmp_file_path)
-        return text.strip()
-    except:
-        return ""
-
-# Summarize text
-def summarize_text(text):
-    if not text:
-        return "No content found."
-    if len(text) > 4000:
-        text = text[:4000]  # Trim to fit model limits
-    summary = summarizer(text, max_length=150, min_length=30, do_sample=False)
-    return summary[0]['summary_text']
-
-# Streamlit UI
-st.set_page_config(page_title="PIB Scraper & Summarizer", layout="wide")
 st.title("📢 PIB Press Release PDF Scraper + LLM Summary")
 
-url = st.text_input("🔗 Enter PIB Press Release Page URL (e.g., https://www.pib.gov.in/allRel.aspx?reg=3&lang=1):")
-start_date = st.date_input("📅 Start Date", value=datetime(2025, 1, 1))
-end_date = st.date_input("📅 End Date", value=datetime(2025, 6, 30))
+pib_url = st.text_input("🔗 Enter PIB Press Release Page URL (e.g., https://pib.gov.in/allRel.aspx):")
+start_date = st.date_input("📅 Start Date", value=datetime(2024, 1, 1))
+end_date = st.date_input("📅 End Date", value=datetime(2024, 12, 31))
 
-if st.button("🔎 Search and Summarize"):
-    if not url:
-        st.error("Please enter a PIB press release page URL.")
+KEYWORDS = [
+    "energy", "oil", "gas", "petroleum", "natural gas", "refinery", "refining", 
+    "crude", "pricing", "shipping", "downstream", "IOCL", "ONGC", "BPCL", "HPCL",
+    "Ministry of Petroleum", "hydrocarbon"
+]
+
+def extract_pdf_links(base_url):
+    response = requests.get(base_url)
+    soup = BeautifulSoup(response.text, "html.parser")
+    anchors = soup.find_all("a", href=True)
+    pdf_links = []
+
+    for a in anchors:
+        text = a.get_text(strip=True).lower()
+        if any(kw.lower() in text for kw in KEYWORDS):
+            link = a['href']
+            if link.endswith(".pdf"):
+                date_match = re.search(r'(\d{2})/(\d{2})/(\d{4})', a.parent.text)
+                if date_match:
+                    day, month, year = map(int, date_match.groups())
+                    pub_date = datetime(year, month, day)
+                    if start_date <= pub_date <= end_date:
+                        pdf_links.append(("https://www.pib.gov.in" + link, pub_date.strftime("%Y-%m-%d")))
+    return pdf_links
+
+def extract_text_from_pdf(url):
+    response = requests.get(url)
+    reader = PdfReader(BytesIO(response.content))
+    return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+
+def summarize(text):
+    if len(text) < 100:
+        return "Text too short to summarize."
+    chunks = [text[i:i+1024] for i in range(0, len(text), 1024)]
+    summaries = [summarizer(chunk, max_length=150, min_length=30, do_sample=False)[0]['summary_text'] for chunk in chunks]
+    return " ".join(summaries)
+
+if st.button("🔍 Fetch and Summarize PDFs"):
+    if not pib_url:
+        st.warning("Please enter a valid PIB URL.")
     else:
-        st.info("🔍 Scraping the page for PDF links...")
-        release_links = extract_press_release_links(url)
-        all_data = []
+        st.info("🔎 Searching for PDFs on page...")
+        links = extract_pdf_links(pib_url)
 
-        for idx, link in enumerate(release_links):
-            st.write(f"\n📄 Processing PDF {idx + 1}/{len(release_links)}")
-            pdfs, release_page = extract_pdf_links_from_release(link)
-            for pdf_url, date_str in pdfs:
-                try:
-                    date_obj = datetime.strptime(date_str, "%d %B %Y")
-                    if start_date <= date_obj.date() <= end_date:
-                        raw_text = download_and_extract_text(pdf_url)
-                        summary = summarize_text(raw_text)
-                        all_data.append({
-                            "Date": date_str,
-                            "PDF URL": pdf_url,
-                            "Summary": summary,
-                            "Press Release Page": release_page
-                        })
-                except Exception as e:
-                    continue
-
-        if all_data:
-            df = pd.DataFrame(all_data)
-            output = BytesIO()
-            df.to_excel(output, index=False, engine='openpyxl')
-            st.success(f"✅ Scraped and summarized {len(df)} relevant PDFs!")
-            st.download_button("📥 Download Summary as Excel", data=output.getvalue(), file_name="pib_summary.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        if not links:
+            st.warning("⚠️ No relevant PDFs found in this date range with matching keywords.")
         else:
-            st.warning("⚠️ No relevant PDFs found in this date range.")
+            data = []
+            for idx, (url, date) in enumerate(links):
+                st.write(f"\n📄 Processing PDF {idx+1}/{len(links)}")
+                try:
+                    text = extract_text_from_pdf(url)
+                    summary = summarize(text)
+                    data.append({"Date": date, "URL": url, "Summary": summary})
+                except Exception as e:
+                    st.error(f"Error processing PDF {url}: {e}")
+
+            if data:
+                df = pd.DataFrame(data)
+                st.dataframe(df)
+
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Summary')
+                    writer.close()
+                st.download_button("📥 Download Summary as Excel", output.getvalue(), file_name="pib_summary.xlsx")
